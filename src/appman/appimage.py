@@ -423,7 +423,7 @@ def _apply_desktop(meta: AppImageMetadata, desktop_name: str, text: str,
     meta.version = desktop.get("X-AppImage-Version")
     if desktop.get("NoDisplay", "").lower() == "true":
         meta.warnings.append("embedded desktop entry sets NoDisplay=true")
-    meta.exec_args = _parse_exec(desktop.get("Exec"), stem)
+    meta.exec_args = _parse_exec(desktop.get("Exec"))
     meta.app_id = sanitize_id(os.path.splitext(desktop_name)[0] or stem)
     return desktop
 
@@ -796,21 +796,23 @@ def _search_icon_tree(root: str, base: str, names: set[str], consider,
                 consider(name, data)
 
 
-def _parse_exec(exec_line: str | None, stem: str) -> list[str]:
+def _parse_exec(exec_line: str | None) -> list[str]:
+    """Return the arguments after the program token of an ``Exec=`` line.
+
+    The first argument of a Desktop Entry ``Exec=`` value names the program
+    to run. AppMan launches the AppImage itself, so that token is always
+    dropped regardless of how it is spelled (``AppRun``, the application
+    name, an absolute path, ...). Matching only known names used to leak the
+    embedded name through as a bogus argument whenever it differed from the
+    AppImage filename.
+    """
     if not exec_line:
         return []
     try:
         tokens = shlex.split(exec_line)
     except ValueError:
         tokens = exec_line.split()
-    if not tokens:
-        return []
-    first = os.path.basename(tokens[0]).lower()
-    if first in {"apprun", "apprun.wrapper"} or first == stem.lower():
-        tokens = tokens[1:]
-    elif first.endswith(".appimage"):
-        tokens = tokens[1:]
-    return tokens
+    return tokens[1:]
 
 
 def _apply_filename_fallback(meta: AppImageMetadata) -> None:

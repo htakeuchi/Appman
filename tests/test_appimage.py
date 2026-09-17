@@ -7,7 +7,7 @@ from unittest import mock
 
 from appman.appimage import (AppImageError, AppImageMetadata,
                              _app_id_from_filename, _choose_desktop_name,
-                             _inspect_unsquashfs, _is_squashfs,
+                             _inspect_unsquashfs, _is_squashfs, _parse_exec,
                              _parse_unsquashfs_listing, _pick_tree_icon,
                              _select_icon_entries, _version_from_filename,
                              icon_size_dir, inspect, sanitize_id, validate)
@@ -126,6 +126,30 @@ class ValidationTest(unittest.TestCase):
     def test_missing_file(self):
         with self.assertRaisesRegex(AppImageError, "not found"):
             validate(self._path("nope.AppImage"))
+
+
+class ParseExecTest(unittest.TestCase):
+    def test_drops_apprun(self):
+        self.assertEqual(_parse_exec("AppRun %U"), ["%U"])
+
+    def test_drops_mismatched_program_name(self):
+        self.assertEqual(_parse_exec("some-product %U"), ["%U"])
+
+    def test_drops_appimage_name(self):
+        self.assertEqual(_parse_exec("SomeProduct.AppImage --foo"), ["--foo"])
+
+    def test_drops_absolute_program_path(self):
+        self.assertEqual(_parse_exec("/opt/app/AppRun -x"), ["-x"])
+
+    def test_program_only_yields_no_args(self):
+        self.assertEqual(_parse_exec("myapp"), [])
+
+    def test_empty(self):
+        self.assertEqual(_parse_exec(None), [])
+        self.assertEqual(_parse_exec(""), [])
+
+    def test_keeps_quoted_arguments(self):
+        self.assertEqual(_parse_exec('myapp "a b" --x'), ["a b", "--x"])
 
 
 class PayloadDetectionTest(unittest.TestCase):
