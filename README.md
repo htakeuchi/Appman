@@ -99,18 +99,17 @@ Useful flags:
 
 ## Development / tests
 
-The test suite uses `unittest`. Most tests run without any fixture; the
-SquashFS reader and installer tests need a real AppImage. Point
-`APPMAN_TEST_APPIMAGE` at any type 2 AppImage to enable them:
+The test suite uses `unittest` and needs no external tools or fixtures. A
+tiny, valid type 2 AppImage is generated in pure Python (see
+`tests/_fixture.py`) so the SquashFS reader, installer and doctor tests run
+everywhere:
 
 ```sh
-APPMAN_TEST_APPIMAGE=/path/to/App.AppImage \
-  PYTHONPATH=src:tests python3 -m unittest discover -s tests -v
+PYTHONPATH=src:tests python3 -m unittest discover -s tests -v
 ```
 
-Tests that need an AppImage are skipped automatically when none is found, and
-each one that inspects image contents skips gracefully when the fixture lacks
-the relevant entry.
+Set `APPMAN_TEST_APPIMAGE=/path/to/App.AppImage` to run against a real
+AppImage instead of the built-in fixture.
 
 ## Limitations
 
