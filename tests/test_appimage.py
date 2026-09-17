@@ -96,6 +96,32 @@ class ValidationTest(unittest.TestCase):
         with self.assertRaisesRegex(AppImageError, "corrupt AppImage"):
             validate(path)
 
+    def test_truncated_elf_header_64(self):
+        path = self._path("short64.AppImage")
+        with open(path, "wb") as handle:
+            handle.write(b"\x7fELF\x02\x01" + b"\x00" * 10)
+        with self.assertRaisesRegex(AppImageError, "truncated ELF header"):
+            validate(path)
+
+    def test_truncated_elf_header_63_bytes(self):
+        path = self._path("short63.AppImage")
+        data = bytearray(63)
+        data[0:4] = b"\x7fELF"
+        data[4] = 2
+        data[5] = 1
+        data[8:11] = b"AI\x02"
+        with open(path, "wb") as handle:
+            handle.write(data)
+        with self.assertRaisesRegex(AppImageError, "truncated ELF header"):
+            validate(path)
+
+    def test_truncated_elf_header_32(self):
+        path = self._path("short32.AppImage")
+        with open(path, "wb") as handle:
+            handle.write(b"\x7fELF\x01\x01" + b"\x00" * 10)
+        with self.assertRaisesRegex(AppImageError, "truncated ELF header"):
+            validate(path)
+
     def test_missing_file(self):
         with self.assertRaisesRegex(AppImageError, "not found"):
             validate(self._path("nope.AppImage"))

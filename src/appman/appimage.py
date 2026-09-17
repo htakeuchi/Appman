@@ -140,7 +140,10 @@ def read_elf_info(fileobj) -> ElfInfo:
     fileobj.seek(0, os.SEEK_END)
     file_size = fileobj.tell()
     fileobj.seek(0)
-    header = fileobj.read(64 if bits == 64 else 52)
+    expected = 64 if bits == 64 else 52
+    header = fileobj.read(expected)
+    if len(header) < expected:
+        raise AppImageError("truncated ELF header")
     machine_raw = struct.unpack_from(endian + "H", header, 18)[0]
     if bits == 64:
         shoff = struct.unpack_from(endian + "Q", header, 40)[0]

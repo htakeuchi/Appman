@@ -125,6 +125,18 @@ class InstallerTest(unittest.TestCase):
         self.assertEqual(targets, [paths.db_path(app.id)])
 
 
+class InstallErrorTest(unittest.TestCase):
+    def test_truncated_elf_reports_clean_error(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "short.AppImage")
+        with open(path, "wb") as handle:
+            handle.write(b"\x7fELF\x02\x01" + b"\x00" * 10)
+        with self.assertRaises(installer.InstallError) as caught:
+            installer.install(path)
+        self.assertIn("truncated ELF header", str(caught.exception))
+
+
 class BuildDesktopTest(unittest.TestCase):
     def test_values_cannot_inject_keys(self):
         app = registry.InstalledApp(
