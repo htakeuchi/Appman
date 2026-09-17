@@ -1,6 +1,7 @@
 import unittest
 
-from appman.desktop import build_exec, escape_exec_arg, parse_desktop
+from appman.desktop import (build_exec, escape_exec_arg, escape_value,
+                            parse_desktop)
 
 
 class DesktopTest(unittest.TestCase):
@@ -26,6 +27,19 @@ class DesktopTest(unittest.TestCase):
     def test_build_exec(self):
         self.assertEqual(build_exec("/bin/app", ["--x", "a b"]),
                          "/bin/app --x \"a b\"")
+
+    def test_escape_value_roundtrip(self):
+        for raw in ("plain", "line1\nline2", "tab\there", "cr\rhere",
+                    "back\\slash", "Utility;\nExec=/bin/evil"):
+            self.assertEqual(parse_desktop(
+                f"[Desktop Entry]\nName={escape_value(raw)}\n")["Name"], raw)
+
+    def test_escape_value_keeps_value_on_one_line(self):
+        line = f"Categories={escape_value('Utility;\nExec=/bin/evil')}"
+        self.assertNotIn("\n", line)
+        entry = parse_desktop(f"[Desktop Entry]\n{line}\nName=Test\n")
+        self.assertEqual(entry["Categories"], "Utility;\nExec=/bin/evil")
+        self.assertIsNone(entry.get("Exec"))
 
 
 if __name__ == "__main__":

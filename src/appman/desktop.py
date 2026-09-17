@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 
 _ESCAPE_RE = re.compile(r'([\\`$"])')
+_VALUE_ESCAPE_RE = re.compile(r"[\\\n\r\t]")
+_VALUE_ESCAPE = {"\\": "\\\\", "\n": "\\n", "\r": "\\r", "\t": "\\t"}
 
 
 class DesktopEntry(dict):
@@ -57,6 +59,16 @@ def _unescape(value: str) -> str:
             out.append(char)
             i += 1
     return "".join(out)
+
+
+def escape_value(value: str) -> str:
+    """Escape a string for use as a Desktop Entry value.
+
+    This is the inverse of :func:`_unescape` for the characters that would
+    otherwise let a value break out of its line (newline, carriage return,
+    tab) or corrupt the escape state (a literal backslash).
+    """
+    return _VALUE_ESCAPE_RE.sub(lambda match: _VALUE_ESCAPE[match.group(0)], value)
 
 
 def escape_exec_arg(arg: str) -> str:

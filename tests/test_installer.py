@@ -5,7 +5,7 @@ import unittest.mock
 
 from appman import installer, paths, registry
 from appman.appimage import sha256_file
-from appman.installer import _managed_paths
+from appman.installer import _build_desktop, _managed_paths
 from appman.util import is_within
 
 from _common import sample_appimage
@@ -123,6 +123,29 @@ class InstallerTest(unittest.TestCase):
         self.assertNotIn(app.launcher_path, targets)
         # The registry record always lives under the managed db directory.
         self.assertEqual(targets, [paths.db_path(app.id)])
+
+
+class BuildDesktopTest(unittest.TestCase):
+    def test_values_cannot_inject_keys(self):
+        app = registry.InstalledApp(
+            id="evil",
+            name="Ok",
+            version=None,
+            installed_at="2020-01-01T00:00:00+00:00",
+            sha256=None,
+            size=0,
+            appimage_path="/apps/evil.AppImage",
+            original_filename="evil.AppImage",
+            comment="hi",
+            categories="Utility;\nExec=/bin/evil\nX-Evil=1",
+        )
+        desktop = _build_desktop(app)
+        entry = {}
+        for line in desktop.splitlines():
+            key, _, value = line.partition("=")
+            entry[key] = value
+        self.assertEqual(entry["Categories"], "Utility;\\nExec=/bin/evil\\nX-Evil=1")
+        self.assertNotIn("X-Evil", entry)
 
 
 if __name__ == "__main__":

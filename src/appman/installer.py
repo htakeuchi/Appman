@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from . import paths, registry
 from .appimage import (AppImageError, AppImageMetadata, icon_size_dir, inspect,
                        read_elf_info, sha256_file)
-from .desktop import build_exec
+from .desktop import build_exec, escape_value
 from .util import (atomic_copy, atomic_write, confirm, is_within, timestamp,
                    update_desktop_database, update_icon_cache, utc_now_iso)
 
@@ -57,21 +57,22 @@ def _fallback_metadata(source: str, reason: str) -> AppImageMetadata:
 
 
 def _build_desktop(app: registry.InstalledApp) -> str:
-    lines = ["[Desktop Entry]", "Type=Application", f"Name={app.name}"]
+    lines = ["[Desktop Entry]", "Type=Application",
+             f"Name={escape_value(app.name)}"]
     if app.comment:
-        lines.append(f"Comment={app.comment}")
+        lines.append(f"Comment={escape_value(app.comment)}")
     lines.append("Exec=" + build_exec(app.appimage_path, list(app.exec_args)))
     if app.icon_theme_name:
-        lines.append(f"Icon={app.icon_theme_name}")
+        lines.append(f"Icon={escape_value(app.icon_theme_name)}")
     if app.wm_class:
-        lines.append(f"StartupWMClass={app.wm_class}")
+        lines.append(f"StartupWMClass={escape_value(app.wm_class)}")
     lines.append("Terminal=false")
-    lines.append(f"Categories={app.categories or 'Utility;'}")
-    lines.append(f"X-AppMan-Id={app.id}")
+    lines.append(f"Categories={escape_value(app.categories or 'Utility;')}")
+    lines.append(f"X-AppMan-Id={escape_value(app.id)}")
     if app.version:
-        lines.append(f"X-AppMan-Version={app.version}")
+        lines.append(f"X-AppMan-Version={escape_value(app.version)}")
     if app.original_filename:
-        lines.append(f"X-AppMan-Original={app.original_filename}")
+        lines.append(f"X-AppMan-Original={escape_value(app.original_filename)}")
     return "\n".join(lines) + "\n"
 
 
