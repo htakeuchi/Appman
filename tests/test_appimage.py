@@ -4,8 +4,10 @@ import tempfile
 import unittest
 from unittest import mock
 
-from appman.appimage import (AppImageError, _app_id_from_filename,
-                             _choose_desktop_name, _pick_tree_icon,
+from appman.appimage import (AppImageError, AppImageMetadata,
+                             _app_id_from_filename, _choose_desktop_name,
+                             _inspect_unsquashfs, _parse_unsquashfs_listing,
+                             _pick_tree_icon, _select_icon_entries,
                              _version_from_filename, icon_size_dir, inspect,
                              sanitize_id, validate)
 from appman.squashfs import SquashFSError
@@ -164,6 +166,127 @@ class InspectTest(unittest.TestCase):
             self.assertFalse(arg.startswith("--appimage-"))
 
 
+class ListingParseTest(unittest.TestCase):
+    LISTING = (
+        "drwxr-xr-x root/root         0 2024-01-01 00:00 squashfs-root\n"
+        "drwxr-xr-x root/root         0 2024-01-01 00:00 squashfs-root/usr\n"
+        "-rw-r--r-- root/root      1234 2024-01-01 00:00 squashfs-root/app.desktop\n"
+        "lrwxrwxrwx root/root         0 2024-01-01 00:00 squashfs-root/.DirIcon -> usr/share/icons/app.svg\n"
+        "-rw-r--r-- root/root    512000 2024-01-01 00:00 squashfs-root/usr/share/icons/app.svg\n"
+    )
+
+    def test_parses_paths_types_and_links(self):
+        entries = {entry.path: entry for entry in _parse_unsquashfs_listing(self.LISTING)}
+        self.assertNotIn("squashfs-root", entries)
+        self.assertTrue(entries["usr"].is_dir)
+        self.assertFalse(entries["app.desktop"].is_dir)
+        self.assertEqual(entries["app.desktop"].size, 1234)
+        self.assertTrue(entries[".DirIcon"].is_link)
+        self.assertEqual(entries[".DirIcon"].target, "usr/share/icons/app.svg")
+        self.assertEqual(entries["usr/share/icons/app.svg"].size, 512000)
+
+    def test_ignores_malformed_lines(self):
+        self.assertEqual(_parse_unsquashfs_listing("garbage\n\n"), [])
+
+
+class IconSelectTest(unittest.TestCase):
+    LISTING = (
+        "drwxr-xr-x root/root         0 2024-01-01 00:00 squashfs-root\n"
+        "lrwxrwxrwx root/root         0 2024-01-01 00:00 squashfs-root/.DirIcon -> app.svg\n"
+        "-rw-r--r-- root/root       100 2024-01-01 00:00 squashfs-root/app.svg\n"
+        "-rw-r--r-- root/root   268435456 2024-01-01 00:00 squashfs-root/app.png\n"
+        "-rw-r--r-- root/root       200 2024-01-01 00:00 squashfs-root/usr/share/icons/hicolor/app.svg\n"
+    )
+
+    def _by_path(self, listing=None):
+        return {entry.path: entry
+                for entry in _parse_unsquashfs_listing(listing or self.LISTING)}
+
+    def test_selects_diricon_and_named_candidates(self):
+        selected = _select_icon_entries(self._by_path(), "app")
+        self.assertIn(".DirIcon", selected)
+        self.assertIn("app.svg", selected)
+        self.assertIn("usr/share/icons/hicolor/app.svg", selected)
+
+    def test_skips_oversized_icon(self):
+        self.assertNotIn("app.png", _select_icon_entries(self._by_path(), "app"))
+
+    def test_skips_absolute_symlink_target(self):
+        listing = (
+            "drwxr-xr-x root/root         0 2024-01-01 00:00 squashfs-root\n"
+            "lrwxrwxrwx root/root         0 2024-01-01 00:00 squashfs-root/.DirIcon -> /etc/passwd\n"
+        )
+        self.assertNotIn(".DirIcon", _select_icon_entries(self._by_path(listing), None))
+
+    def test_skips_escaping_symlink_target(self):
+        listing = (
+            "drwxr-xr-x root/root         0 2024-01-01 00:00 squashfs-root\n"
+            "lrwxrwxrwx root/root         0 2024-01-01 00:00 squashfs-root/app.png -> ../../secret.png\n"
+        )
+        self.assertEqual(_select_icon_entries(self._by_path(listing), "app"), [])
+
+
+class UnsquashfsInspectTest(unittest.TestCase):
+    DESKTOP = (
+        "[Desktop Entry]\nName=Fallback App\nX-AppImage-Version=9.9\n"
+        "Icon=fallback\nExec=AppRun %U\nCategories=Game;\n"
+        "StartupWMClass=Fallback\n"
+    )
+    LISTING = (
+        "drwxr-xr-x root/root         0 2024-01-01 00:00 squashfs-root\n"
+        "-rw-r--r-- root/root   1073741824 2024-01-01 00:00 squashfs-root/AppRun\n"
+        "-rw-r--r-- root/root      1024 2024-01-01 00:00 squashfs-root/fallback.desktop\n"
+        "lrwxrwxrwx root/root         0 2024-01-01 00:00 squashfs-root/.DirIcon -> fallback.png\n"
+        "-rw-r--r-- root/root     65000 2024-01-01 00:00 squashfs-root/fallback.png\n"
+    )
+
+    def _fake_extract(self, exe, image_path, offset, dest, paths):
+        files = {
+            "fallback.desktop": self.DESKTOP.encode("utf-8"),
+            ".DirIcon": _tiny_png(64),
+            "fallback.png": _tiny_png(512),
+        }
+        for path in paths:
+            data = files.get(path)
+            if data is None:
+                continue
+            full = os.path.join(dest, path)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "wb") as handle:
+                handle.write(data)
+        return True
+
+    def test_selective_extraction_reads_metadata(self):
+        entries = _parse_unsquashfs_listing(self.LISTING)
+        meta = AppImageMetadata(path="/tmp/Fallback.AppImage", size=0)
+        with mock.patch("appman.appimage.which", return_value="/usr/bin/unsquashfs"), \
+             mock.patch("appman.appimage._unsquashfs_list", return_value=entries), \
+             mock.patch("appman.appimage._unsquashfs_extract",
+                        side_effect=self._fake_extract):
+            self.assertTrue(_inspect_unsquashfs(
+                "/tmp/Fallback.AppImage", 0, meta, "fallback"))
+        self.assertEqual(meta.name, "Fallback App")
+        self.assertEqual(meta.version, "9.9")
+        self.assertEqual(meta.icon_ext, ".png")
+        self.assertEqual(meta.icon_bytes[:8], b"\x89PNG\r\n\x1a\n")
+
+    def test_large_apprun_is_never_extracted(self):
+        entries = _parse_unsquashfs_listing(self.LISTING)
+        meta = AppImageMetadata(path="/tmp/Fallback.AppImage", size=0)
+        requested = []
+
+        def record(exe, image_path, offset, dest, paths):
+            requested.extend(paths)
+            return self._fake_extract(exe, image_path, offset, dest, paths)
+
+        with mock.patch("appman.appimage.which", return_value="/usr/bin/unsquashfs"), \
+             mock.patch("appman.appimage._unsquashfs_list", return_value=entries), \
+             mock.patch("appman.appimage._unsquashfs_extract", side_effect=record):
+            _inspect_unsquashfs("/tmp/Fallback.AppImage", 0, meta, "fallback")
+        self.assertNotIn("AppRun", requested)
+        self.assertIn("fallback.desktop", requested)
+
+
 @unittest.skipUnless(SAMPLE, "no sample AppImage available (set APPMAN_TEST_APPIMAGE)")
 class UnsquashfsFallbackTest(unittest.TestCase):
     DESKTOP = (
@@ -171,20 +294,35 @@ class UnsquashfsFallbackTest(unittest.TestCase):
         "Icon=fallback\nExec=AppRun %U\nCategories=Game;\n"
         "StartupWMClass=Fallback\n"
     )
+    LISTING = (
+        "drwxr-xr-x root/root         0 2024-01-01 00:00 squashfs-root\n"
+        "-rw-r--r-- root/root      1024 2024-01-01 00:00 squashfs-root/fallback.desktop\n"
+        "lrwxrwxrwx root/root         0 2024-01-01 00:00 squashfs-root/.DirIcon -> fallback.png\n"
+        "-rw-r--r-- root/root     65000 2024-01-01 00:00 squashfs-root/fallback.png\n"
+    )
 
-    def _fake_extract(self, image_path, offset, dest):
-        with open(os.path.join(dest, "fallback.desktop"), "w", encoding="utf-8") as fh:
-            fh.write(self.DESKTOP)
-        with open(os.path.join(dest, ".DirIcon"), "wb") as fh:
-            fh.write(_tiny_png(64))
-        with open(os.path.join(dest, "fallback.png"), "wb") as fh:
-            fh.write(_tiny_png(512))
+    def _fake_extract(self, exe, image_path, offset, dest, paths):
+        files = {
+            "fallback.desktop": self.DESKTOP.encode("utf-8"),
+            ".DirIcon": _tiny_png(64),
+            "fallback.png": _tiny_png(512),
+        }
+        for path in paths:
+            data = files.get(path)
+            if data is None:
+                continue
+            full = os.path.join(dest, path)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "wb") as handle:
+                handle.write(data)
         return True
 
     def test_falls_back_when_compression_unsupported(self):
+        entries = _parse_unsquashfs_listing(self.LISTING)
         error = SquashFSError("unsupported SquashFS compression: lzo")
         with mock.patch("appman.appimage.SquashFS", side_effect=error), \
              mock.patch("appman.appimage.which", return_value="/usr/bin/unsquashfs"), \
+             mock.patch("appman.appimage._unsquashfs_list", return_value=entries), \
              mock.patch("appman.appimage._unsquashfs_extract",
                         side_effect=self._fake_extract):
             meta = inspect(SAMPLE)
@@ -193,6 +331,24 @@ class UnsquashfsFallbackTest(unittest.TestCase):
         self.assertEqual(meta.app_id, "fallback")
         self.assertEqual(meta.icon_ext, ".png")
         self.assertEqual(meta.icon_bytes[:8], b"\x89PNG\r\n\x1a\n")
+
+    def test_extracts_only_needed_paths(self):
+        entries = _parse_unsquashfs_listing(self.LISTING)
+        error = SquashFSError("unsupported SquashFS compression: lzo")
+        requested = []
+
+        def record(exe, image_path, offset, dest, paths):
+            requested.extend(paths)
+            return self._fake_extract(exe, image_path, offset, dest, paths)
+
+        with mock.patch("appman.appimage.SquashFS", side_effect=error), \
+             mock.patch("appman.appimage.which", return_value="/usr/bin/unsquashfs"), \
+             mock.patch("appman.appimage._unsquashfs_list", return_value=entries), \
+             mock.patch("appman.appimage._unsquashfs_extract", side_effect=record):
+            inspect(SAMPLE)
+        self.assertLessEqual(set(requested),
+                             {"fallback.desktop", ".DirIcon", "fallback.png"})
+        self.assertIn("fallback.desktop", requested)
 
     def test_reports_missing_unsquashfs(self):
         error = SquashFSError("unsupported SquashFS compression: lzo")

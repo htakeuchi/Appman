@@ -16,6 +16,9 @@ from .squashfs import SquashFS, SquashFSError
 from .util import which
 
 UNSQUASHFS_TIMEOUT = 600
+MAX_DESKTOP_BYTES = 1 << 20
+MAX_ICON_BYTES = 16 << 20
+MAX_ICON_CANDIDATES = 256
 
 ELF_MAGIC = b"\x7fELF"
 APPIMAGE_MAGIC = b"AI"
@@ -496,23 +499,206 @@ def _is_unsupported_compression(exc: Exception) -> bool:
             or "zstd compressed SquashFS needs Python 3.14" in message)
 
 
+@dataclass
+class _TreeEntry:
+    path: str
+    is_dir: bool
+    is_link: bool
+    size: int
+    target: str | None = None
+
+
 def _inspect_unsquashfs(path: str, offset: int, meta: AppImageMetadata,
                         stem: str) -> bool:
-    """Fallback for compression the built-in reader cannot handle."""
-    if which("unsquashfs") is None:
+    """Fallback for compression the built-in reader cannot handle.
+
+    The filesystem is listed first and only the ``.desktop`` entry and the
+    icon candidates are extracted, so a hostile image cannot make us unpack a
+    multi-gigabyte payload into the temporary directory (a /tmp exhaustion
+    DoS).
+    """
+    exe = which("unsquashfs")
+    if exe is None:
         return False
+    entries = _unsquashfs_list(exe, path, offset)
+    if entries is None:
+        return False
+    by_path = {entry.path: entry for entry in entries}
+    desktop_path = _choose_desktop_entry(by_path, stem)
+
     with tempfile.TemporaryDirectory(prefix="appman-unpack-") as dest:
-        if not _unsquashfs_extract(path, offset, dest):
-            return False
+        if desktop_path is not None:
+            wanted = _expand_tree_paths(by_path, [desktop_path])
+            if not _unsquashfs_extract(exe, path, offset, dest, wanted):
+                return False
+
+        icon_field = _desktop_icon_field(dest, desktop_path)
+        icon_paths = _select_icon_entries(by_path, icon_field)
+        if icon_paths:
+            wanted = _expand_tree_paths(by_path, icon_paths)
+            if not _unsquashfs_extract(exe, path, offset, dest, wanted):
+                return False
+
         _metadata_from_tree(dest, meta, stem)
     return True
 
 
-def _unsquashfs_extract(image_path: str, offset: int, dest: str) -> bool:
-    exe = which("unsquashfs")
-    if not exe:
-        return False
-    command = [exe, "-o", str(offset), "-d", dest, "-no-progress", "-f", image_path]
+def _unsquashfs_list(exe: str, image_path: str, offset: int):
+    command = [exe, "-o", str(offset), "-ll", "-no-progress", image_path]
+    try:
+        result = subprocess.run(
+            command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, timeout=UNSQUASHFS_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return _parse_unsquashfs_listing(result.stdout)
+
+
+def _parse_unsquashfs_listing(text: str) -> list[_TreeEntry]:
+    """Parse the ``unsquashfs -ll`` output.
+
+    Lines look like ``PERMS USER/GROUP SIZE DATE TIME PATH[ -> TARGET]``.
+    """
+    entries: list[_TreeEntry] = []
+    for line in text.splitlines():
+        parts = line.split(None, 5)
+        if len(parts) < 6:
+            continue
+        perms, _owner, size_raw, _date, _time, rest = parts
+        if not perms:
+            continue
+        is_dir = perms[0] == "d"
+        is_link = perms[0] == "l"
+        target = None
+        path = rest
+        if is_link and " -> " in rest:
+            path, target = rest.split(" -> ", 1)
+        if "/" not in path:
+            continue
+        path = path.split("/", 1)[1]
+        if not path:
+            continue
+        try:
+            size = int(size_raw)
+        except ValueError:
+            size = 0
+        entries.append(_TreeEntry(path, is_dir, is_link, size, target))
+    return entries
+
+
+def _resolve_target_path(path: str, target: str) -> str | None:
+    if not target or target.startswith("/"):
+        return None
+    parent = os.path.dirname(path)
+    resolved = os.path.normpath(os.path.join(parent, target) if parent else target)
+    if resolved in (".", "..") or resolved.startswith("../") or resolved.startswith("/"):
+        return None
+    return resolved
+
+
+def _resolve_entry(by_path: dict[str, _TreeEntry], entry: _TreeEntry | None,
+                   _depth: int = 0) -> _TreeEntry | None:
+    """Follow symlinks to the regular file they point at inside the tree."""
+    if entry is None or entry.is_dir or _depth > 8:
+        return None
+    if not entry.is_link:
+        return entry
+    target = _resolve_target_path(entry.path, entry.target or "")
+    if target is None:
+        return None
+    return _resolve_entry(by_path, by_path.get(target), _depth + 1)
+
+
+def _expand_tree_paths(by_path: dict[str, _TreeEntry],
+                       paths: list[str]) -> list[str]:
+    """Add the in-tree targets of any symlinks in *paths*."""
+    selected: list[str] = []
+    seen: set[str] = set()
+    pending = list(paths)
+    while pending:
+        path = pending.pop()
+        if path in seen:
+            continue
+        seen.add(path)
+        selected.append(path)
+        entry = by_path.get(path)
+        if entry is None or not entry.is_link:
+            continue
+        target = _resolve_target_path(path, entry.target or "")
+        if target is not None:
+            pending.append(target)
+    return selected
+
+
+def _choose_desktop_entry(by_path: dict[str, _TreeEntry], stem: str) -> str | None:
+    candidates = []
+    for path, entry in by_path.items():
+        if entry.is_dir or path.startswith("-") or "/" in path:
+            continue
+        if not path.lower().endswith(".desktop"):
+            continue
+        resolved = _resolve_entry(by_path, entry)
+        if resolved is None or resolved.size > MAX_DESKTOP_BYTES:
+            continue
+        candidates.append(path)
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda name: _score_desktop(name, stem))[0]
+
+
+def _desktop_icon_field(dest: str, desktop_path: str | None) -> str | None:
+    if desktop_path is None:
+        return None
+    raw = _read_tree_file(dest, os.path.join(dest, desktop_path))
+    if raw is None:
+        return None
+    return parse_desktop(raw.decode("utf-8", "replace")).get("Icon")
+
+
+def _select_icon_entries(by_path: dict[str, _TreeEntry],
+                         icon_field: str | None) -> list[str]:
+    candidates: list[tuple[str, _TreeEntry]] = []
+
+    diricon = by_path.get(".DirIcon")
+    if diricon is not None and not diricon.is_dir:
+        resolved = _resolve_entry(by_path, diricon)
+        if resolved is not None and resolved.size <= MAX_ICON_BYTES:
+            candidates.append((".DirIcon", resolved))
+
+    names: set[str] = set()
+    if icon_field:
+        names.add(icon_field.lower())
+        names.add(os.path.splitext(icon_field)[0].lower())
+    if names:
+        for path, entry in by_path.items():
+            if entry.is_dir or path == ".DirIcon" or path.startswith("-"):
+                continue
+            if os.path.splitext(path)[1].lower() not in _ICON_EXTS:
+                continue
+            if os.path.splitext(os.path.basename(path))[0].lower() not in names:
+                continue
+            if "/" in path and not (path.startswith("usr/share/pixmaps/")
+                                    or path.startswith("usr/share/icons/")):
+                continue
+            resolved = _resolve_entry(by_path, entry)
+            if resolved is None or resolved.size > MAX_ICON_BYTES:
+                continue
+            candidates.append((path, resolved))
+
+    candidates.sort(key=lambda item: _icon_rank(
+        os.path.splitext(item[1].path)[1].lower(), item[1].size))
+    return [path for path, _entry in candidates[:MAX_ICON_CANDIDATES]]
+
+
+def _unsquashfs_extract(exe: str, image_path: str, offset: int, dest: str,
+                        paths: list[str]) -> bool:
+    if not paths:
+        return True
+    command = [exe, "-o", str(offset), "-d", dest, "-no-progress", "-f",
+               image_path, *paths]
     try:
         result = subprocess.run(
             command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
