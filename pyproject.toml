@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "appman"
+version = "0.1.0"
+description = "Manage AppImages as first-class desktop applications on Omarchy / Arch Linux"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "AppMan" }]
+keywords = ["appimage", "omarchy", "arch", "desktop", "cli"]
+classifiers = [
+  "Environment :: Console",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+]
+dependencies = []
+
+[project.scripts]
+appman = "appman.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/appman"]
