@@ -5,6 +5,7 @@ import unittest
 from unittest import mock
 
 from appman.appimage import (AppImageError, _app_id_from_filename,
+                             _choose_desktop_name, _pick_tree_icon,
                              _version_from_filename, icon_size_dir, inspect,
                              sanitize_id, validate)
 from appman.squashfs import SquashFSError
@@ -96,6 +97,55 @@ class ValidationTest(unittest.TestCase):
     def test_missing_file(self):
         with self.assertRaisesRegex(AppImageError, "not found"):
             validate(self._path("nope.AppImage"))
+
+
+class TreeSymlinkTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = os.path.join(self.tmp.name, "root")
+        self.outside = os.path.join(self.tmp.name, "outside")
+        os.makedirs(self.root)
+        os.makedirs(self.outside)
+        self.secret = os.path.join(self.outside, "id_rsa")
+        with open(self.secret, "wb") as handle:
+            handle.write(_tiny_png(64))
+        self.secret_desktop = os.path.join(self.outside, "evil.desktop")
+        with open(self.secret_desktop, "w", encoding="utf-8") as handle:
+            handle.write("[Desktop Entry]\nName=Evil\n")
+
+    def test_desktop_symlink_outside_rejected(self):
+        os.symlink(self.secret_desktop, os.path.join(self.root, "evil.desktop"))
+        self.assertIsNone(_choose_desktop_name(self.root, ["evil.desktop"], "evil"))
+
+    def test_desktop_regular_file_accepted(self):
+        with open(os.path.join(self.root, "app.desktop"), "w", encoding="utf-8") as handle:
+            handle.write("[Desktop Entry]\nName=App\n")
+        self.assertEqual(_choose_desktop_name(self.root, ["app.desktop"], "app"),
+                         "app.desktop")
+
+    def test_icon_symlink_outside_rejected(self):
+        os.symlink(self.secret, os.path.join(self.root, "evil.png"))
+        self.assertIsNone(_pick_tree_icon(self.root, "evil"))
+
+    def test_diricon_symlink_outside_rejected(self):
+        os.symlink(self.secret, os.path.join(self.root, ".DirIcon"))
+        self.assertIsNone(_pick_tree_icon(self.root, None))
+
+    def test_icon_symlink_inside_accepted(self):
+        real = os.path.join(self.root, "real.png")
+        with open(real, "wb") as handle:
+            handle.write(_tiny_png(64))
+        os.symlink(real, os.path.join(self.root, "app.png"))
+        picked = _pick_tree_icon(self.root, "app")
+        self.assertIsNotNone(picked)
+        self.assertEqual(picked[0], "app.png")
+
+    def test_pixmap_directory_symlink_outside_rejected(self):
+        os.makedirs(os.path.join(self.root, "usr", "share"))
+        os.symlink(self.outside, os.path.join(self.root, "usr/share/pixmaps"))
+        os.symlink(self.secret, os.path.join(self.outside, "app.png"))
+        self.assertIsNone(_pick_tree_icon(self.root, "app"))
 
 
 @unittest.skipUnless(SAMPLE, "no sample AppImage available (set APPMAN_TEST_APPIMAGE)")

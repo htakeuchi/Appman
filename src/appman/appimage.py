@@ -287,10 +287,39 @@ def _choose_desktop(entries: list[tuple[str, int, object]], stem: str):
     return sorted(candidates, key=lambda item: _score_desktop(item[0], stem))[0]
 
 
+def _contained_realpath(root: str, path: str) -> str | None:
+    """Resolve *path* and return it only if it stays inside *root*.
+
+    Protects against symlinks in an extracted tree that point at host files
+    (e.g. ``evil.png -> /home/user/.ssh/id_rsa``).
+    """
+    root_real = os.path.realpath(root)
+    real = os.path.realpath(path)
+    if real == root_real or real.startswith(root_real + os.sep):
+        return real
+    return None
+
+
+def _read_tree_file(root: str, path: str) -> bytes | None:
+    """Read *path* if it resolves to a regular file inside *root*."""
+    real = _contained_realpath(root, path)
+    if real is None or not os.path.isfile(real):
+        return None
+    try:
+        with open(real, "rb") as handle:
+            return handle.read()
+    except OSError:
+        return None
+
+
 def _choose_desktop_name(root: str, names: list[str], stem: str) -> str | None:
-    candidates = [name for name in names
-                  if name.lower().endswith(".desktop")
-                  and os.path.isfile(os.path.join(root, name))]
+    candidates = []
+    for name in names:
+        if not name.lower().endswith(".desktop"):
+            continue
+        real = _contained_realpath(root, os.path.join(root, name))
+        if real is not None and os.path.isfile(real):
+            candidates.append(name)
     if not candidates:
         return None
     return sorted(candidates, key=lambda name: _score_desktop(name, stem))[0]
@@ -498,9 +527,9 @@ def _metadata_from_tree(root: str, meta: AppImageMetadata, stem: str) -> None:
     names = os.listdir(root)
     desktop_name = _choose_desktop_name(root, names, stem)
     desktop = None
-    if desktop_name is not None:
-        with open(os.path.join(root, desktop_name), "rb") as handle:
-            text = _decode_text(handle.read(), meta)
+    raw = _read_tree_file(root, os.path.join(root, desktop_name)) if desktop_name else None
+    if raw is not None:
+        text = _decode_text(raw, meta)
         desktop = _apply_desktop(meta, desktop_name, text, stem)
     else:
         meta.warnings.append(
@@ -524,19 +553,16 @@ def _pick_tree_icon(root: str, icon_field: str | None):
         if ext in _ICON_EXTS:
             candidates.append((image_path, len(data), ext, data))
 
-    root_real = os.path.realpath(root)
     diricon = os.path.join(root, ".DirIcon")
     if os.path.lexists(diricon):
-        real = os.path.realpath(diricon)
-        if real == root_real or real.startswith(root_real + os.sep):
-            if os.path.isfile(real):
-                with open(real, "rb") as handle:
-                    data = handle.read()
-                ext = os.path.splitext(real)[1].lower()
-                if ext not in _ICON_EXTS:
-                    ext = _sniff_icon_ext(data)
-                if ext in _ICON_EXTS:
-                    candidates.append((".DirIcon", len(data), ext, data))
+        data = _read_tree_file(root, diricon)
+        if data is not None:
+            real = _contained_realpath(root, diricon)
+            ext = os.path.splitext(real)[1].lower()
+            if ext not in _ICON_EXTS:
+                ext = _sniff_icon_ext(data)
+            if ext in _ICON_EXTS:
+                candidates.append((".DirIcon", len(data), ext, data))
 
     names = set()
     if icon_field:
@@ -544,12 +570,13 @@ def _pick_tree_icon(root: str, icon_field: str | None):
         names.add(os.path.splitext(icon_field)[0].lower())
     if names:
         for name in os.listdir(root):
-            candidate = os.path.join(root, name)
-            if os.path.isfile(candidate) and os.path.splitext(name)[0].lower() in names:
-                with open(candidate, "rb") as handle:
-                    consider(name, handle.read())
+            if os.path.splitext(name)[0].lower() not in names:
+                continue
+            data = _read_tree_file(root, os.path.join(root, name))
+            if data is not None:
+                consider(name, data)
         for base in ("usr/share/pixmaps", "usr/share/icons"):
-            _search_icon_tree(os.path.join(root, base), names, consider)
+            _search_icon_tree(root, os.path.join(root, base), names, consider)
 
     if not candidates:
         return None
@@ -557,20 +584,27 @@ def _pick_tree_icon(root: str, icon_field: str | None):
     return best[0], best[3], best[2]
 
 
-def _search_icon_tree(base: str, names: set[str], consider, _depth: int = 0):
-    if _depth > 4 or not os.path.isdir(base):
+def _search_icon_tree(root: str, base: str, names: set[str], consider,
+                      _depth: int = 0):
+    if _depth > 4:
+        return
+    real_base = _contained_realpath(root, base)
+    if real_base is None or not os.path.isdir(real_base):
         return
     try:
-        entries = os.listdir(base)
+        entries = os.listdir(real_base)
     except OSError:
         return
     for name in entries:
-        path = os.path.join(base, name)
-        if os.path.isdir(path):
-            _search_icon_tree(path, names, consider, _depth + 1)
-        elif os.path.isfile(path) and os.path.splitext(name)[0].lower() in names:
-            with open(path, "rb") as handle:
-                consider(name, handle.read())
+        real = _contained_realpath(root, os.path.join(real_base, name))
+        if real is None:
+            continue
+        if os.path.isdir(real):
+            _search_icon_tree(root, real, names, consider, _depth + 1)
+        elif os.path.isfile(real) and os.path.splitext(name)[0].lower() in names:
+            data = _read_tree_file(root, real)
+            if data is not None:
+                consider(name, data)
 
 
 def _parse_exec(exec_line: str | None, stem: str) -> list[str]:
