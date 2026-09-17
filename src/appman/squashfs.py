@@ -146,7 +146,7 @@ class SquashFS:
          self.xattr_id_table_start, self.inode_table_start,
          self.directory_table_start, self.fragment_table_start,
          self.export_table_start) = struct.unpack_from("<QQQQQQQQ", raw, 32)
-        if self.major not in (3, 4):
+        if self.major != 4:
             raise SquashFSError(f"unsupported SquashFS version {self.major}.{self.minor}")
         if self.compression not in COMPRESSION_NAMES:
             raise SquashFSError(f"unknown SquashFS compression id {self.compression}")

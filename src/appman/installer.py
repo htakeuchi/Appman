@@ -313,11 +313,6 @@ def remove(app: registry.InstalledApp, *, yes: bool = False, dry_run: bool = Fal
     if outcome.backed_up:
         outcome.removed.append(f"backed up -> {outcome.backed_up}")
 
-    try:
-        registry.delete(app.id)
-    except OSError as exc:
-        errors.append(f"{paths.db_path(app.id)}: {exc}")
-
     update_desktop_database(paths.applications_dir())
     if app.icon_path:
         update_icon_cache(os.path.join(paths.icons_theme_dir(), 'hicolor'))

@@ -1,3 +1,4 @@
+import io
 import os
 import struct
 import tempfile
@@ -6,10 +7,10 @@ from unittest import mock
 
 from appman.appimage import (AppImageError, AppImageMetadata,
                              _app_id_from_filename, _choose_desktop_name,
-                             _inspect_unsquashfs, _parse_unsquashfs_listing,
-                             _pick_tree_icon, _select_icon_entries,
-                             _version_from_filename, icon_size_dir, inspect,
-                             sanitize_id, validate)
+                             _inspect_unsquashfs, _is_squashfs,
+                             _parse_unsquashfs_listing, _pick_tree_icon,
+                             _select_icon_entries, _version_from_filename,
+                             icon_size_dir, inspect, sanitize_id, validate)
 from appman.squashfs import SquashFSError
 
 from _common import sample_appimage
@@ -125,6 +126,21 @@ class ValidationTest(unittest.TestCase):
     def test_missing_file(self):
         with self.assertRaisesRegex(AppImageError, "not found"):
             validate(self._path("nope.AppImage"))
+
+
+class PayloadDetectionTest(unittest.TestCase):
+    def _superblock(self, major: int) -> io.BytesIO:
+        raw = bytearray(96)
+        raw[0:4] = b"hsqs"
+        struct.pack_into("<IIIIHHHHHH", raw, 4,
+                         1, 0, 4096, 0, 1, 12, 0, 1, major, 0)
+        return io.BytesIO(bytes(raw))
+
+    def test_accepts_version_4(self):
+        self.assertTrue(_is_squashfs(self._superblock(4), 0))
+
+    def test_rejects_version_3(self):
+        self.assertFalse(_is_squashfs(self._superblock(3), 0))
 
 
 class TreeSymlinkTest(unittest.TestCase):

@@ -7,7 +7,7 @@ import os
 from dataclasses import asdict, dataclass, field
 
 from . import paths
-from .util import atomic_write
+from .util import atomic_write, is_within
 
 
 @dataclass
@@ -85,8 +85,16 @@ def save(app: InstalledApp) -> None:
 
 
 def delete(app_id: str) -> None:
+    """Remove the registry file for *app_id* if it is inside the db dir.
+
+    ``app_id`` may come from an untrusted registry file, so the resolved
+    path must stay under :func:`paths.db_dir` before anything is unlinked.
+    """
+    path = paths.db_path(app_id)
+    if not is_within(path, paths.db_dir()):
+        return
     try:
-        os.unlink(paths.db_path(app_id))
+        os.unlink(path)
     except FileNotFoundError:
         pass
 

@@ -178,7 +178,7 @@ def _is_squashfs(fileobj, offset: int) -> bool:
      _flags, _ids, major, _minor) = struct.unpack_from("<IIIIHHHHHH", raw, 4)
     if block_size < 4096 or block_size > 1 << 24 or (block_size & (block_size - 1)):
         return False
-    if major not in (3, 4):
+    if major != 4:
         return False
     if compression not in (1, 2, 3, 4, 5, 6):
         return False

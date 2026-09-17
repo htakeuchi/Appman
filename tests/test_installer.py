@@ -125,6 +125,54 @@ class InstallerTest(unittest.TestCase):
         self.assertEqual(targets, [paths.db_path(app.id)])
 
 
+class RegistryDeleteTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        env = {
+            "APPMAN_HOME": os.path.join(self.tmp.name, "appman-home"),
+            "XDG_DATA_HOME": os.path.join(self.tmp.name, "data"),
+        }
+        self._patch = unittest.mock.patch.dict(os.environ, env)
+        self._patch.start()
+        self.addCleanup(self._patch.stop)
+        paths.ensure_dirs()
+
+    def test_refuses_id_escaping_db_dir(self):
+        outside = os.path.join(self.tmp.name, "outside.json")
+        with open(outside, "w", encoding="utf-8") as handle:
+            handle.write("{}")
+        registry.delete("../../outside")
+        self.assertTrue(os.path.exists(outside))
+
+    def test_deletes_managed_entry(self):
+        target = paths.db_path("ok")
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write("{}")
+        registry.delete("ok")
+        self.assertFalse(os.path.exists(target))
+
+    def test_remove_deletes_registry_file(self):
+        app = registry.InstalledApp(
+            id="solo",
+            name="Solo",
+            version=None,
+            installed_at="2020-01-01T00:00:00+00:00",
+            sha256=None,
+            size=0,
+            appimage_path=paths.appimage_path("solo"),
+            original_filename="solo.AppImage",
+            launcher_path=paths.launcher_path("solo"),
+        )
+        with open(paths.db_path("solo"), "w", encoding="utf-8") as handle:
+            handle.write(app.to_json())
+        with open(app.launcher_path, "w", encoding="utf-8") as handle:
+            handle.write("[Desktop Entry]\n")
+        installer.remove(app, yes=True)
+        self.assertFalse(os.path.exists(paths.db_path("solo")))
+        self.assertFalse(os.path.exists(app.launcher_path))
+
+
 class InstallErrorTest(unittest.TestCase):
     def test_truncated_elf_reports_clean_error(self):
         tmp = tempfile.TemporaryDirectory()

@@ -1,11 +1,31 @@
+import io
+import struct
 import unittest
 
 from appman.appimage import read_elf_info
-from appman.squashfs import SquashFS
+from appman.squashfs import SquashFS, SquashFSError
 
 from _common import sample_appimage
 
 SAMPLE = sample_appimage()
+
+
+def _superblock(major: int, minor: int = 0) -> bytes:
+    raw = bytearray(96)
+    raw[0:4] = b"hsqs"
+    struct.pack_into("<IIIIHHHHHH", raw, 4,
+                     1, 0, 4096, 0, 1, 12, 0, 1, major, minor)
+    return bytes(raw)
+
+
+class VersionTest(unittest.TestCase):
+    def test_version_4_accepted(self):
+        squash = SquashFS(io.BytesIO(_superblock(4)))
+        self.assertEqual(squash.major, 4)
+
+    def test_version_3_rejected(self):
+        with self.assertRaisesRegex(SquashFSError, "unsupported SquashFS version 3.0"):
+            SquashFS(io.BytesIO(_superblock(3)))
 
 
 @unittest.skipUnless(SAMPLE, "no sample AppImage available (set APPMAN_TEST_APPIMAGE)")
